@@ -360,8 +360,23 @@ class HomeScreen(context: Context) : LinearLayout(context), MainActivity.Refresh
 
     // ---- tool actions ----
 
+    /**
+     * Open the DSH web UI on the phone.
+     *
+     * DSH listens on 127.0.0.1 only, so the phone must go through an SSH tunnel
+     * rather than connecting to the server address directly. The URL and token
+     * still come from the API, but the browser is pointed at the tunnel's local
+     * end (127.0.0.1:3080).
+     */
     private fun openDsh() {
-        Toast.makeText(context, "\u6B63\u5728\u51C6\u5907 DSH\u2026", Toast.LENGTH_SHORT).show()
+        val progress = AlertDialog.Builder(context)
+            .setTitle("\u6B63\u5728\u51C6\u5907 DSH\u2026")
+            .setMessage("\u6B65\u9AA4\uff1a\u53D6\u4EE4\u724C \u2192 \u5EFA SSH \u96A7\u9053 \u2192 \u6253\u5F00\u6D4F\u89C8\u5668")
+            .setCancelable(true)
+            .create()
+        progress.show()
+
+        // 1. token + staleness from the API
         ApiClient.get(context, "/api/dsh") { result ->
             when (result) {
                 is ApiClient.Result.Ok -> {
@@ -369,29 +384,78 @@ class HomeScreen(context: Context) : LinearLayout(context), MainActivity.Refresh
                     val url = json.optString("url", "")
                     val stale = json.optBoolean("stale", false)
                     if (url.isBlank()) {
-                        Toast.makeText(context, "\u6CA1\u6709\u53EF\u7528\u7684 DSH \u5730\u5740", Toast.LENGTH_LONG).show()
+                        progress.dismiss()
+                        AlertDialog.Builder(context)
+                            .setTitle("\u6CA1\u6709\u53EF\u7528\u7684 DSH \u5730\u5740")
+                            .setMessage(
+                                "\u670D\u52A1\u5668\u4E0A\u8FD8\u6CA1\u6709\u4EE4\u724C\u6587\u4EF6\u3002\n\n" +
+                                "\u5728 EQR6 \u4E0A\u8FD0\u884C\uff1a\n" +
+                                "start-dsh-web.ps1\n\n" +
+                                "\u7136\u540E\u91CD\u8BD5\u3002"
+                            )
+                            .setPositiveButton("\u597D", null)
+                            .show()
                         return@get
                     }
-                    // the saved URL points at 127.0.0.1:3080 on the server; the
-                    // phone must instead reach the server's own address
+                    // tunnel host: the address the API answered on, minus the port
                     val host = result.base.replace("http://", "").replace("https://", "")
-                    val hostOnly = host.substringBefore(':')
-                    val phoneUrl = url.replace("127.0.0.1", hostOnly)
+                        .substringBefore(':')
                     if (stale) {
+                        progress.dismiss()
                         AlertDialog.Builder(context)
                             .setTitle("\u4EE4\u724C\u53EF\u80FD\u5DF2\u5931\u6548")
-                            .setMessage("\u65B0\u4EE4\u724C\u5C06\u5728 DSH \u91CD\u542F\u540E\u751F\u6210\u3002\u4ECD\u8981\u6253\u5F00\u5417\uff1f")
-                            .setPositiveButton("\u4ECD\u8981\u6253\u5F00") { _, _ -> launchUrl(phoneUrl) }
+                            .setMessage(
+                                "\u670D\u52A1\u5668\u4E0A\u7684 DSH \u5DF2\u91CD\u542F\uFF0C\u4FDD\u5B58\u7684\u4EE4\u724C\u53EF\u80FD\u8FC7\u671F\u3002\n" +
+                                "\u4ECD\u7136\u53EF\u4EE5\u8BD5\u4E00\u4E0B\u3002"
+                            )
+                            .setPositiveButton("\u4ECD\u8981\u6253\u5F00") { _, _ ->
+                                startTunnelThenOpen(host, url, progress)
+                            }
                             .setNegativeButton("\u53D6\u6D88", null)
                             .show()
                     } else {
-                        launchUrl(phoneUrl)
+                        startTunnelThenOpen(host, url, progress)
                     }
                 }
-                is ApiClient.Result.Err ->
+                is ApiClient.Result.Err -> {
+                    progress.dismiss()
                     Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                }
             }
         }
+    }
+
+    private fun startTunnelThenOpen(host: String, serverUrl: String, progress: AlertDialog) {
+        Thread {
+            try {
+                if (!SshTunnel.isRunning()) {
+                    SshTunnel.start(context, host)
+                }
+                // the tunnel end is always loopback on the phone
+                val tokenMatch = Regex("token=([A-Za-z0-9_\\-]+)").find(serverUrl)
+                val token = tokenMatch?.groupValues?.get(1)
+                val phoneUrl = if (token != null) {
+                    "http://127.0.0.1:${SshTunnel.LOCAL_PORT}/?token=$token"
+                } else {
+                    "http://127.0.0.1:${SshTunnel.LOCAL_PORT}/"
+                }
+                post {
+                    progress.dismiss()
+                    launchUrl(phoneUrl)
+                }
+            } catch (e: Exception) {
+                val msg = SshTunnel.error() ?: (e.message ?: "\u672A\u77E5\u9519\u8BEF")
+                post {
+                    progress.dismiss()
+                    AlertDialog.Builder(context)
+                        .setTitle("SSH \u96A7\u9053\u5EFA\u7ACB\u5931\u8D25")
+                        .setMessage(msg + "\n\n\u5982\u679C\u63D0\u793A\u8BA4\u8BC1\u5931\u8D25\uff0c" +
+                                "\u8BF7\u5230\u300C\u8BBE\u7F6E\u300D\u9875\u590D\u5236\u624B\u673A\u516C\u94A5\u5E76\u88C5\u5230 EQR6\u3002")
+                        .setPositiveButton("\u597D", null)
+                        .show()
+                }
+            }
+        }.start()
     }
 
     private fun launchUrl(url: String) {

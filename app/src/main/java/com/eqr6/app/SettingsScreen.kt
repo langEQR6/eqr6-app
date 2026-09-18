@@ -27,6 +27,7 @@ class SettingsScreen(
     private val keyEdit: EditText
     private val testResult: TextView
     private val tsBox = LinearLayout(context)
+    private val sshBox = LinearLayout(context)
     private val versionText = TextView(context)
     private val updateStatus = TextView(context)
 
@@ -116,7 +117,18 @@ class SettingsScreen(
             setBackgroundColor(Color.WHITE)
             setPadding(dp(14), dp(14), dp(14), dp(14))
         }
+
+        // ---------------- ssh key (for the DSH tunnel) ----------------
+        inner.addView(spacer(18))
+        inner.addView(section("SSH 密钥（用于打开 DSH）"))
+        sshBox.apply {
+            orientation = VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+        }
         inner.addView(tsBox, topGap(8))
+        // placeholder for the SSH card, filled by refreshSshCard()
+        inner.addView(sshBox, topGap(8))
 
         // ---------------- update ----------------
         inner.addView(spacer(18))
@@ -256,6 +268,93 @@ class SettingsScreen(
         versionText.text =
             "当前版本：${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})"
         updateTsCard()
+        refreshSshCard()
+    }
+
+    /**
+     * Shows the phone's own SSH public key.
+     *
+     * The user copies this one line into
+     * C:\ProgramData\ssh\administrators_authorized_keys on EQR6 (with the ACL
+     * left as SYSTEM + Administrators only). Once installed, the app can open
+     * an SSH tunnel and therefore the DSH web UI.
+     */
+    private fun refreshSshCard() {
+        sshBox.removeAllViews()
+
+        if (!SshKeys.hasKey(context)) {
+            sshBox.addView(TextView(context).apply {
+                text = "还没有生成密钥。点下面的按钮生成一对。"
+                textSize = 12f
+                setTextColor(Color.parseColor("#616161"))
+            })
+            sshBox.addView(actionButton("生成密钥", true) {
+                try {
+                    SshKeys.ensureKey(context)
+                    Toast.makeText(context, "已生成", Toast.LENGTH_SHORT).show()
+                    refresh()
+                } catch (e: Exception) {
+                    Toast.makeText(context, "生成失败：${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }, topGap(10))
+            return
+        }
+
+        val pub = SshKeys.readPublicLine(context) ?: ""
+        sshBox.addView(TextView(context).apply {
+            text = "① 复制下面这一行（手机的公钥）"
+            textSize = 12f
+            setTextColor(Color.parseColor("#616161"))
+        })
+        sshBox.addView(TextView(context).apply {
+            text = pub
+            textSize = 10f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(Color.parseColor("#212121"))
+            setBackgroundColor(Color.parseColor("#F5F5F5"))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setTextIsSelectable(true)
+        }, topGap(6))
+
+        sshBox.addView(TextView(context).apply {
+            text = "② 在 EQR6 上执行（管理员 PowerShell）：\n" +
+                   "Add-Content 'C:\\ProgramData\\ssh\\administrators_authorized_keys' " +
+                   "'<粘贴公钥>'\n" +
+                   "然后按文档修正该文件权限。"
+            textSize = 11f
+            setTextColor(Color.parseColor("#616161"))
+            setBackgroundColor(Color.parseColor("#F5F5F5"))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }, topGap(10))
+
+        val row = LinearLayout(context).apply { orientation = HORIZONTAL }
+        row.addView(actionButton("复制公钥", true) {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                    as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("pubkey", pub))
+            Toast.makeText(context, "公钥已复制", Toast.LENGTH_SHORT).show()
+        })
+        row.addView(actionButton("重新生成", false) {
+            android.app.AlertDialog.Builder(context)
+                .setTitle("重新生成密钥？")
+                .setMessage("旧公钥会立即失效，需要重新装到 EQR6 上。")
+                .setPositiveButton("重新生成") { _, _ ->
+                    SshKeys.deleteKey(context)
+                    SshKeys.ensureKey(context)
+                    refresh()
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        })
+        sshBox.addView(row, topGap(10))
+
+        sshBox.addView(TextView(context).apply {
+            text = "隧道状态：" + if (SshTunnel.isRunning()) "✔ 已建立" else "未建立（打开 DSH 时会自动建立）"
+            textSize = 11f
+            setTextColor(Color.parseColor(
+                if (SshTunnel.isRunning()) "#2E7D32" else "#9E9E9E"
+            ))
+        }, topGap(10))
     }
 
     private fun updateTsCard() {

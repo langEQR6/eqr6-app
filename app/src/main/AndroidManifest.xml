@@ -4,6 +4,18 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!--
+      PACKAGE VISIBILITY (Android 11+)
+      Since API 30 an app cannot see other packages unless it declares them.
+      Without this block getLaunchIntentForPackage("com.tailscale.ipn") returns
+      null, which made the app wrongly report "Tailscale not installed" and
+      refuse to open it.
+      Network-interface based detection never needed this; only launching did.
+    -->
+    <queries>
+        <package android:name="com.tailscale.ipn" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"

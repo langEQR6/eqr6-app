@@ -11,8 +11,8 @@ android {
         applicationId = "com.eqr6.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 7
-        versionName = "2.0"
+        versionCode = 8
+        versionName = "2.1"
 
         // Default OTA manifest location.
         // Served by serve-app.py (scheduled task EQR6-AppUpdateServer) on
@@ -84,7 +84,16 @@ android {
     }
 }
 
-// Deliberately NO third-party dependencies: plain framework APIs only.
-// This keeps the first build fast and removes dependency-resolution risk.
+// The ONLY third-party dependency in this project.
+//
+// It exists for one feature: opening the DSH web UI from the phone. DSH binds
+// to 127.0.0.1 on the server by design (that is the security model), so the
+// phone cannot reach it directly - it needs a local SSH tunnel, which is what
+// sshj provides. Every other screen works without it.
 dependencies {
+    implementation("com.hierynomus:sshj:0.38.0")
+
+    // sshj logs through slf4j. The no-op binding avoids a "no binding" warning
+    // and adds almost nothing to the APK.
+    implementation("org.slf4j:slf4j-nop:2.0.13")
 }
