@@ -531,11 +531,23 @@ class HomeScreen(context: Context) : LinearLayout(context), MainActivity.Refresh
                 val msg = SshTunnel.error() ?: (e.message ?: "\u672A\u77E5\u9519\u8BEF")
                 post {
                     progress.dismiss()
+                    val advice = when {
+                        msg.contains("\u8BA4\u8BC1\u5931\u8D25") || msg.contains("Auth fail", true) ->
+                            "\u2192 \u5230\u300C\u8BBE\u7F6E\u300D\u9875\u590D\u5236\u624B\u673A\u516C\u94A5\uFF0C\u786E\u8BA4\u5DF2\u88C5\u5230 EQR6\u3002"
+                        msg.contains("algorithm", true) ->
+                            "\u2192 \u52A0\u5BC6\u7B97\u6CD5\u517C\u5BB9\u95EE\u9898\uFF0C\u8BF7\u628A\u539F\u6587\u53D1\u7ED9\u6211\u3002"
+                        msg.contains("\u8D85\u65F6") || msg.contains("timed out", true) ->
+                            "\u2192 \u5165\u53E3\u8D85\u65F6\uFF0C\u786E\u8BA4\u624B\u673A Tailscale \u5DF2\u5F00\u540E\u91CD\u8BD5\u3002"
+                        msg.contains("refused", true) ->
+                            "\u2192 EQR6 \u7684 SSH \u672A\u54CD\u5E94\uFF0C\u8BF7\u628A\u539F\u6587\u53D1\u7ED9\u6211\u3002"
+                        else ->
+                            "\u2192 \u8BF7\u628A\u4E0A\u9762\u7684\u539F\u6587\u53D1\u7ED9\u6211\uFF0C\u6211\u6765\u5B9A\u4F4D\u3002"
+                    }
                     AlertDialog.Builder(context)
                         .setTitle("SSH \u96A7\u9053\u5EFA\u7ACB\u5931\u8D25")
-                        .setMessage(msg + "\n\n\u5982\u679C\u63D0\u793A\u8BA4\u8BC1\u5931\u8D25\uff0c" +
-                                "\u8BF7\u5230\u300C\u8BBE\u7F6E\u300D\u9875\u590D\u5236\u624B\u673A\u516C\u94A5\u5E76\u88C5\u5230 EQR6\u3002")
-                        .setPositiveButton("\u597D", null)
+                        .setMessage("$msg\n\n$advice")
+                        .setPositiveButton("\u91CD\u8BD5") { _, _ -> openDsh() }
+                        .setNegativeButton("\u597D", null)
                         .show()
                 }
             }

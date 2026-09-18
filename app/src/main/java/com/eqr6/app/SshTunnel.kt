@@ -65,7 +65,27 @@ object SshTunnel {
         }
         val provider = SshKeys.keyProvider(context)
 
-        val client = SSHClient()
+        // WHY X25519 IS EXCLUDED ON ANDROID
+        // ---------------------------------
+        // sshj's default key-exchange list leads with BouncyCastle's X25519.
+        // In bcprov every X25519 class lives under META-INF/versions/11/ (the
+        // Java 9+ multi-release layout), which Android's D8/R8 does not process.
+        // The packaged APK therefore contains no X25519 and the handshake dies
+        // with:  no such algorithm: X25519 for provider BC
+        //
+        // The NIST curves are implemented in the Android platform provider and
+        // in the ordinary part of BouncyCastle, so they work on a phone.
+        //
+        // Note: SSHClient has no config setter - the Config must be passed to
+        // the constructor.
+        val cfg = net.schmizz.sshj.DefaultConfig()
+        cfg.setKeyExchangeFactories(cfg.keyExchangeFactories.filter {
+            val n = it.name.uppercase()
+            !n.contains("X25519") && !n.contains("CURVE25519") &&
+            !n.contains("X448") && !n.contains("CURVE448")
+        })
+
+        val client = SSHClient(cfg)
         try {
             client.addHostKeyVerifier(PromiscuousVerifier())
             client.connectTimeout = 15000
