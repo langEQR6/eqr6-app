@@ -57,6 +57,9 @@ jobs:
           mkdir -p keystore
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > keystore/eqr6-release.jks
           ls -l keystore/
+          echo "keystore bytes: $(stat -c%s keystore/eqr6-release.jks)"
+          # fail loudly if the secret did not decode to a plausible jks
+          test "$(stat -c%s keystore/eqr6-release.jks)" -gt 1000
 
       - name: Read version from gradle file
         id: ver
@@ -69,13 +72,28 @@ jobs:
 
       - name: Build release APK
         env:
-          EQR6_KEYSTORE: keystore/eqr6-release.jks
+          EQR6_KEYSTORE: ${{ github.workspace }}/keystore/eqr6-release.jks
           EQR6_STORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
           EQR6_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           EQR6_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon --console=plain
+
+      - name: Verify the APK is signed
+        # A previous run published an UNSIGNED apk, which would have broken the
+        # OTA chain (Android rejects updates with a mismatched/absent
+        # signature). Fail here rather than publish a bad artifact.
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n1)
+          echo "checking: $APK"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -n1)
+          echo "apksigner: $APKSIGNER"
+          if ! "$APKSIGNER" verify --print-certs "$APK"; then
+            echo "::error::Release APK is NOT signed. Refusing to publish."
+            exit 1
+          fi
+          echo "signature OK"
 
       - name: Locate APK and compute hash
         id: apk

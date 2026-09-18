@@ -24,10 +24,18 @@ android {
 
     // Release builds are signed with the project keystore so that OTA
     // upgrades are accepted by Android (same signature required).
+    //
+    // NOTE: a CI run once produced an UNSIGNED apk silently, because the
+    // keystore lookup failed and the build just carried on. Now an expected
+    // keystore that is missing is a hard build failure, and the workflow
+    // verifies the signature before publishing.
     signingConfigs {
         create("release") {
-            val ksPath = System.getenv("EQR6_KEYSTORE") ?: "../keystore/eqr6-release.jks"
+            val envPath = System.getenv("EQR6_KEYSTORE")
+            val ksPath = if (!envPath.isNullOrBlank()) envPath else "../keystore/eqr6-release.jks"
             val ksFile = file(ksPath)
+            logger.lifecycle("signing: EQR6_KEYSTORE env = " + (envPath ?: "(unset)"))
+            logger.lifecycle("signing: resolved keystore = ${ksFile.absolutePath} exists=${ksFile.exists()}")
             if (ksFile.exists()) {
                 storeFile = ksFile
                 storePassword = System.getenv("EQR6_STORE_PASS") ?: "eqr6app2026"
@@ -41,8 +49,20 @@ android {
         getByName("release") {
             isMinifyEnabled = false
             isShrinkResources = false
-            if (file(System.getenv("EQR6_KEYSTORE") ?: "../keystore/eqr6-release.jks").exists()) {
+
+            val envPath = System.getenv("EQR6_KEYSTORE")
+            val ksPath = if (!envPath.isNullOrBlank()) envPath else "../keystore/eqr6-release.jks"
+            val ksFile = file(ksPath)
+            if (ksFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
+                logger.lifecycle("signing: release build WILL be signed")
+            } else if (!envPath.isNullOrBlank()) {
+                throw GradleException(
+                    "EQR6_KEYSTORE was set to '" + envPath +
+                    "' but that file does not exist. Refusing to build an unsigned release APK."
+                )
+            } else {
+                logger.lifecycle("signing: no keystore found - release build will be UNSIGNED")
             }
         }
         getByName("debug") {
