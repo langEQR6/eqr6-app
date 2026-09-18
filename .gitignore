@@ -12,6 +12,9 @@ keystore/
 *.keystore
 keystore-credentials.txt
 
+# secrets - NEVER commit a GitHub token
+.github-token
+
 # IDE
 .idea/
 *.iml

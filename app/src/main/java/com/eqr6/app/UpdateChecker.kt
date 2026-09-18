@@ -106,21 +106,33 @@ object UpdateChecker {
                     continue
                 }
                 try {
-                    val json = JSONObject(httpGet(url))
+                    val source = hostOf(url)
+                    val manifest = fetchManifest(url, null)
+                    val json = JSONObject(manifest)
                     val code = json.optInt("versionCode", 0)
                     val name = json.optString("versionName", "?")
                     val changeNotes = json.optString("notes", "")
-                    val source = hostOf(url)
 
                     if (code <= BuildConfig.VERSION_CODE) {
                         callback(Result.UpToDate(BuildConfig.VERSION_NAME, source))
                         return@execute
                     }
 
-                    val raw = json.optString("apkUrl", "")
+                    var raw = json.optString("apkUrl", "")
                     if (raw.isBlank()) {
                         notes.append(source).append(": manifest has no apkUrl\n")
                         continue
+                    }
+                    // A relative apkUrl normally sits beside the manifest. For
+                    // GitHub we resolve it through the API instead, because the
+                    // github.com redirect is blocked here.
+                    if (url.contains("/releases/") && url.contains("github.com")) {
+                        try {
+                            val base = url.substringBeforeLast('/')
+                            raw = resolveGithubRelease("$base/$raw", null)
+                        } catch (e: Exception) {
+                            // fall back to the literal relative resolution
+                        }
                     }
                     val apkUrl = if (raw.startsWith("http")) raw else resolveRelative(url, raw)
                     callback(Result.Available(code, name, apkUrl, changeNotes, source))
@@ -134,6 +146,35 @@ object UpdateChecker {
         }
     }
 
+    /**
+     * Fetch the manifest, with a China-friendly fallback for GitHub.
+     *
+     * A `github.com/.../releases/latest/download/...` URL is tried first
+     * (works wherever github.com is reachable, e.g. with a VPN). If that
+     * fails, we fall back to `api.github.com`, which is reachable from
+     * mainland China and redirects asset downloads straight to the CDN.
+     */
+    private fun fetchManifest(url: String, apiToken: String?): String {
+        val isGithubRelease = url.contains("github.com") && url.contains("/releases/latest/download/")
+        if (!isGithubRelease) return httpGet(url)
+
+        return try {
+            httpGet(url)
+        } catch (directError: Exception) {
+            // rebuild the same request against api.github.com
+            val apiUrl = url
+                .replace("https://github.com/", "https://api.github.com/repos/")
+                .replace("/releases/latest/download/", "/releases/latest/download/")
+            try {
+                httpGet(apiUrl)
+            } catch (apiError: Exception) {
+                // last resort: resolve the asset id via the releases endpoint
+                val assetApi = resolveGithubRelease(apiUrl, apiToken)
+                httpGet(assetApi)
+            }
+        }
+    }
+
     fun download(context: Context, update: Result.Available, callback: (File?) -> Unit) {
         io.execute {
             try {
@@ -141,13 +182,23 @@ object UpdateChecker {
                 val target = File(dir, "app-${update.versionCode}.apk")
                 if (target.exists()) target.delete()
 
+                // The Accept header matters: a GitHub API asset URL returns
+                // JSON metadata instead of the file unless it is set to
+                // application/octet-stream. Hence the shared helper.
+                val isGithubApi = update.apkUrl.contains("api.github.com/repos/") &&
+                        update.apkUrl.contains("/releases/assets/")
                 val conn = (URL(update.apkUrl).openConnection() as HttpURLConnection).apply {
                     connectTimeout = CONNECT_TIMEOUT_MS
-                    readTimeout = 30000
+                    readTimeout = 60000
                     instanceFollowRedirects = true
+                    if (isGithubApi) {
+                        setRequestProperty("Accept", "application/octet-stream")
+                        setRequestProperty("User-Agent", "EQR6-App")
+                    }
                     connect()
                 }
                 if (conn.responseCode !in 200..299) {
+                    conn.disconnect()
                     callback(null)
                     return@execute
                 }
@@ -173,11 +224,13 @@ object UpdateChecker {
     // helpers
     // ------------------------------------------------------------------
 
-    /** Quick TCP connect test so an offline address fails in ~2.5 s, not 12 s. */
+    /** Quick TCP connect test so an offline address fails fast, not after a full HTTP timeout. */
     private fun isReachable(url: String): Boolean {
         return try {
             val u = URL(url)
-            val port = if (u.port > 0) u.port else 80
+            // https defaults to 443, not 80 - getting this wrong made every
+            // https candidate look unreachable.
+            val port = if (u.port > 0) u.port else if (u.protocol == "https") 443 else 80
             Socket().use { s ->
                 s.connect(InetSocketAddress(u.host, port), PROBE_TIMEOUT_MS)
                 true
@@ -188,11 +241,80 @@ object UpdateChecker {
     }
 
     private fun httpGet(url: String): String {
+        // GitHub API asset downloads need the octet-stream Accept header to
+        // return the file. They are followed automatically to the asset CDN.
+        val isGithubApi = url.contains("api.github.com/repos/") && url.contains("/releases/assets/")
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = READ_TIMEOUT_MS
             instanceFollowRedirects = true
-            setRequestProperty("Cache-Control", "no-cache")
+            if (isGithubApi) {
+                setRequestProperty("Accept", "application/octet-stream")
+                setRequestProperty("User-Agent", "EQR6-App")
+            } else {
+                setRequestProperty("Cache-Control", "no-cache")
+            }
+            connect()
+        }
+        return try {
+            if (conn.responseCode !in 200..299) {
+                throw IllegalStateException("HTTP ${conn.responseCode}")
+            }
+            conn.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /**
+     * Resolve a version manifest from a GitHub release.
+     *
+     * WHY THIS IS NEEDED IN MAINLAND CHINA
+     * ------------------------------------
+     * `https://github.com/<o>/<r>/releases/latest/download/version.json`
+     * is the obvious URL, but it redirects through github.com, which is
+     * frequently blocked, so the redirect dies even though the file itself
+     * lives on a reachable CDN (objects.githubusercontent.com).
+     *
+     * api.github.com, by contrast, is reachable. Asking the API for the
+     * release's assets returns metadata directly, and fetching
+     * `.../releases/assets/<id>` with Accept: application/octet-stream
+     * redirects straight to the CDN.
+     *
+     * `apiToken` is optional: unauthenticated calls work for public repos.
+     */
+    private fun resolveGithubRelease(manifestUrl: String, apiToken: String?): String {
+        val cut = manifestUrl.indexOf("/releases/")
+        if (cut < 0) throw IllegalStateException("not a release URL")
+
+        val apiRepoBase = manifestUrl.substring(0, cut)          // https://api.github.com/repos/O/R
+        val wantName = manifestUrl.substringAfterLast('/')       // version.json
+
+        val releaseJson = JSONObject(apiGet(apiRepoBase + "/releases/latest", apiToken))
+        val assets = releaseJson.optJSONArray("assets")
+            ?: throw IllegalStateException("release has no assets")
+
+        for (i in 0 until assets.length()) {
+            val a = assets.getJSONObject(i)
+            if (a.optString("name") == wantName) {
+                val id = a.optLong("id", 0)
+                if (id <= 0) throw IllegalStateException("asset has no id")
+                return "$apiRepoBase/releases/assets/$id"
+            }
+        }
+        throw IllegalStateException("asset $wantName not found in release")
+    }
+
+    private fun apiGet(url: String, apiToken: String?): String {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = READ_TIMEOUT_MS
+            instanceFollowRedirects = true
+            setRequestProperty("Accept", "application/vnd.github+json")
+            setRequestProperty("User-Agent", "EQR6-App")
+            if (!apiToken.isNullOrBlank()) {
+                setRequestProperty("Authorization", "token $apiToken")
+            }
             connect()
         }
         return try {
