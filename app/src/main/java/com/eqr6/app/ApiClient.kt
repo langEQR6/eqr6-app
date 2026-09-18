@@ -30,11 +30,16 @@ import java.util.concurrent.Executors
  */
 object ApiClient {
 
-    const val DEFAULT_BASE = "http://192.168.3.11:8080"
+    const val DEFAULT_BASE = "http://100.77.117.76:8080"
 
+    /**
+     * Tailscale first: it works both at home (direct LAN path over the tunnel)
+     * and anywhere else. The plain LAN address only helps at home, so trying it
+     * first made every request from outside wait for a failed probe.
+     */
     private val CANDIDATES = listOf(
-        "http://192.168.3.11:8080",
-        "http://100.77.117.76:8080"
+        "http://100.77.117.76:8080",
+        "http://192.168.3.11:8080"
     )
 
     private const val PROBE_TIMEOUT_MS = 2500

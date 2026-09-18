@@ -40,6 +40,8 @@ class SettingsScreen(
     // current OTA state
     private var pendingUpdate: UpdateChecker.Result.Available? = null
     private var downloadedApk: java.io.File? = null
+    // last key generation failure, shown instead of a vague toast
+    private var lastKeyError: String? = null
 
     init {
         orientation = VERTICAL
@@ -277,6 +279,20 @@ class SettingsScreen(
         Prefs.setApiKey(context, keyEdit.text.toString())
     }
 
+    /** Generate the key, reporting the real reason when every algorithm fails. */
+    private fun generateKey() {
+        lastKeyError = null
+        try {
+            val info = SshKeys.regenerate(context)
+            Toast.makeText(context, "已生成：${info.algorithm}", Toast.LENGTH_SHORT).show()
+            refresh()
+        } catch (e: Throwable) {
+            lastKeyError = e.message ?: e.javaClass.simpleName
+            Toast.makeText(context, "生成失败，详情见下方红框", Toast.LENGTH_LONG).show()
+            refresh()
+        }
+    }
+
     private fun checkUpdate() {
         pendingUpdate = null
         downloadedApk = null
@@ -460,21 +476,31 @@ class SettingsScreen(
                 textSize = 12f
                 setTextColor(Color.parseColor("#616161"))
             })
+            // surface the last generation failure, if any
+            if (lastKeyError != null) {
+                sshBox.addView(TextView(context).apply {
+                    text = "上次生成失败：\n$lastKeyError"
+                    textSize = 11f
+                    setTextColor(Color.parseColor("#C62828"))
+                    setBackgroundColor(Color.parseColor("#FFEBEE"))
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                    setTextIsSelectable(true)
+                }, topGap(10))
+            }
             sshBox.addView(actionButton("生成密钥", true) {
-                try {
-                    SshKeys.ensureKey(context)
-                    Toast.makeText(context, "已生成", Toast.LENGTH_SHORT).show()
-                    refresh()
-                } catch (e: Exception) {
-                    Toast.makeText(context, "生成失败：${e.message}", Toast.LENGTH_LONG).show()
-                }
+                generateKey()
             }, topGap(10))
             return
         }
 
+        val alg = try {
+            SshKeys.ensureKey(context).algorithm
+        } catch (e: Exception) {
+            "?"
+        }
         val pub = SshKeys.readPublicLine(context) ?: ""
         sshBox.addView(TextView(context).apply {
-            text = "① 复制下面这一行（手机的公钥）"
+            text = "① 复制下面这一行（手机的公钥）\n密钥类型：$alg"
             textSize = 12f
             setTextColor(Color.parseColor("#616161"))
         })

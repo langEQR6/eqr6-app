@@ -40,9 +40,21 @@ object UpdateChecker {
     private const val CONNECT_TIMEOUT_MS = 12000
     private const val READ_TIMEOUT_MS = 20000
 
+    /**
+     * Candidate order.
+     *
+     * Tailscale comes first because it works in BOTH situations: at home it
+     * resolves to a direct LAN path, and away from home it still connects. The
+     * raw LAN address only works at home, so putting it first meant every check
+     * from outside paid a failed 4-second probe before trying something that
+     * actually worked.
+     *
+     * GitHub is last: it needs github.com to be reachable, which is not always
+     * true in mainland China.
+     */
     private val DEFAULT_CANDIDATES = listOf(
-        "http://192.168.3.11:8080/version.json",
         "http://100.77.117.76:8080/version.json",
+        "http://192.168.3.11:8080/version.json",
         "https://github.com/langEQR6/eqr6-app/releases/latest/download/version.json"
     )
 
