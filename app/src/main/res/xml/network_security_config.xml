@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      The first APK is fetched from the EQR6 shared folder over the LAN or
+      Tailscale, which is plain HTTP. Cleartext is allowed here on purpose.
+      Once OTA moves to GitHub (HTTPS), this can be tightened or removed.
+    -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">EQR6 App</string>
+    <string name="version_label">版本 %1$s (build %2$d)</string>
+    <string name="check_now">检查更新</string>
+
+    <string name="status_idle">就绪。点上面的按钮手动检查更新。</string>
+    <string name="status_checking">正在检查更新…</string>
+    <string name="status_uptodate">已是最新版本 (%1$s)。\n更新服务器：%2$s</string>
+    <string name="status_available">发现新版本 %1$s (build %2$d)，正在准备下载…</string>
+    <string name="status_download_failed">下载失败，请稍后重试。</string>
+    <string name="status_failed">检查更新失败：\n%1$s</string>
+    <string name="status_downloaded">已下载：%1$s，正在打开安装界面…</string>
+    <string name="status_install_failed">无法启动安装：%1$s</string>
+    <string name="need_install_permission">请先允许本应用「安装未知应用」，然后重新点检查更新。</string>
+
+    <string name="server_label">更新服务器地址（留空 = 自动，先试局域网再试 Tailscale）</string>
+    <string name="server_hint">http://192.168.3.11:8080/version.json</string>
+    <string name="server_save">保存地址</string>
+    <string name="server_saved">已保存。点「检查更新」测试。</string>
+    <string name="server_reset">已恢复为自动选择。</string>
+    <string name="probe_hint">提示：检查更新约需 3 秒。若两个地址都不通，请确认手机 Tailscale 已开启，或与 EQR6 在同一 WiFi。</string>
+    <string name="ota_test_marker">OTA 通道验证版本 (1.3)</string>
+</resources>

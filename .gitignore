@@ -1,0 +1,23 @@
+# build outputs
+build/
+app/build/
+.gradle/
+
+# local machine config
+local.properties
+
+# signing material - NEVER commit
+keystore/
+*.jks
+*.keystore
+keystore-credentials.txt
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

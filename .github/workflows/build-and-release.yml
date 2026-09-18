@@ -1,0 +1,113 @@
+name: build-and-release
+
+# Builds the APK in the cloud and publishes it as a GitHub Release.
+# The release then serves as the OTA source, so the phone can update from
+# any network without Tailscale and without the EQR6 being reachable.
+#
+# Trigger: push a tag like v1.4
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew || true
+
+      - name: Decode signing keystore
+        # The keystore is stored base64-encoded in repository secrets so the
+        # release APK is signed with the SAME key as every previous build.
+        # Android refuses to install an update signed with a different key.
+        run: |
+          mkdir -p keystore
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > keystore/eqr6-release.jks
+          ls -l keystore/
+
+      - name: Read version from gradle file
+        id: ver
+        run: |
+          CODE=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts)
+          NAME=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version $NAME ($CODE)"
+
+      - name: Build release APK
+        env:
+          EQR6_KEYSTORE: keystore/eqr6-release.jks
+          EQR6_STORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          EQR6_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          EQR6_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --console=plain
+
+      - name: Locate APK and compute hash
+        id: apk
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n1)
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$APK" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          ls -lh "$APK"
+
+      - name: Rename APK to a stable asset name
+        run: |
+          mkdir -p dist
+          cp "${{ steps.apk.outputs.path }}" dist/eqr6-app-release.apk
+          ls -lh dist/
+
+      - name: Write version manifest
+        # The app polls this file. apkUrl points at the asset in this same
+        # release, so it is reachable on any network with no authentication.
+        run: |
+          cat > dist/version.json <<EOF
+          {
+            "versionCode": ${{ steps.ver.outputs.code }},
+            "versionName": "${{ steps.ver.outputs.name }}",
+            "apkUrl": "eqr6-app-release.apk",
+            "sha256": "${{ steps.apk.outputs.sha256 }}",
+            "publishedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "notes": "built by GitHub Actions from ${{ github.ref_name }}"
+          }
+          EOF
+          cat dist/version.json
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ steps.ver.outputs.name }} (build ${{ steps.ver.outputs.code }})
+          body: |
+            Automated build of EQR6 App ${{ steps.ver.outputs.name }}.
+
+            Install / update URLs (stable, always point at the latest release):
+
+            - manifest: `https://github.com/${{ github.repository }}/releases/latest/download/version.json`
+            - apk: `https://github.com/${{ github.repository }}/releases/latest/download/eqr6-app-release.apk`
+
+            SHA256: `${{ steps.apk.outputs.sha256 }}`
+          files: |
+            dist/eqr6-app-release.apk
+            dist/version.json
+          fail_on_unmatched_files: true
