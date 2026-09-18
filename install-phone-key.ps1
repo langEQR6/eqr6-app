@@ -152,6 +152,6 @@ try {
 
 Say ''
 Say '=================================================' 'Cyan'
-Say '  Done. Now open the app and tap "打开 DSH".' 'Green'
+Say '  Done. Now open the app and tap the DSH button.' 'Green'
 Say '=================================================' 'Cyan'
 Say ''
