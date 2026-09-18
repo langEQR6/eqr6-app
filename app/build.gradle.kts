@@ -11,8 +11,8 @@ android {
         applicationId = "com.eqr6.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.4"
 
         // Default OTA manifest location.
         // Served by serve-app.py (scheduled task EQR6-AppUpdateServer) on

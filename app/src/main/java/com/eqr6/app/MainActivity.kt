@@ -52,14 +52,20 @@ class MainActivity : Activity() {
             setPadding(0, pad / 2, 0, pad)
         })
 
-        // ---- version marker ----
+        // ---- version markers ----
         // Present so an over-the-air update is visually verifiable, not just a
         // changed number in a text field.
         root.addView(TextView(this).apply {
             text = getString(R.string.ota_test_marker)
-            textSize = 16f
+            textSize = 15f
             setTextColor(Color.parseColor("#1565C0"))
-            setPadding(0, pad / 2, 0, pad / 2)
+            setPadding(0, pad / 2, 0, 0)
+        })
+        root.addView(TextView(this).apply {
+            text = getString(R.string.ota_marker_github)
+            textSize = 15f
+            setTextColor(Color.parseColor("#2E7D32"))
+            setPadding(0, 0, 0, pad / 2)
         })
 
         // ---- check button ----

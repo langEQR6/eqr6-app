@@ -45,13 +45,23 @@ object UpdateChecker {
 
     const val PREF_MANIFEST_URL = "manifest_url"
 
-    /** LAN first (fast when at home), then Tailscale (works anywhere). */
+    /**
+     * Ordered candidates.
+     *
+     *  1. LAN      - fastest when the phone is at home
+     *  2. Tailscale- works anywhere, but only if the phone has Tailscale on
+     *  3. GitHub   - works on ANY network with no VPN and no home server
+     *
+     * Each is probed with a short TCP connect first, so an unreachable entry
+     * costs ~4 s rather than a full HTTP timeout.
+     */
     private val DEFAULT_CANDIDATES = listOf(
         "http://192.168.3.11:8080/version.json",
-        "http://100.77.117.76:8080/version.json"
+        "http://100.77.117.76:8080/version.json",
+        "https://github.com/langEQR6/eqr6-app/releases/latest/download/version.json"
     )
 
-    private const val PROBE_TIMEOUT_MS = 2500
+    private const val PROBE_TIMEOUT_MS = 4000
     private const val CONNECT_TIMEOUT_MS = 12000
     private const val READ_TIMEOUT_MS = 20000
 
