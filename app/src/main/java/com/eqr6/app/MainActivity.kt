@@ -1,231 +1,136 @@
 package com.eqr6.app
 
 import android.app.Activity
-import android.content.Intent
 import android.graphics.Color
-import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
-import android.text.InputType
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
-import java.io.File
 
 /**
- * Minimal UI. Plain framework APIs only - no external libraries.
+ * Toolbox shell: four tabs along the bottom, one screen each.
  *
- * Shows the installed version, lets the user check for updates, and exposes
- * the update-server address so switching hosts (LAN -> Tailscale -> GitHub)
- * never needs a rebuild.
+ * Plain framework views only - the project carries no external dependencies,
+ * so the tab bar is a row of TextViews rather than a Material component.
+ * Screens are built once and kept in memory; switching just toggles visibility,
+ * which keeps tab changes instant and avoids re-fetching on every tap.
  */
 class MainActivity : Activity() {
 
-    private lateinit var statusView: TextView
-    private lateinit var serverEdit: EditText
+    private lateinit var content: FrameLayout
+    private lateinit var tabViews: List<TextView>
+    private lateinit var screens: List<View>
+
+    private var current = 0
+
+    companion object {
+        private const val TAB_HOME = 0
+        private const val TAB_LOGS = 1
+        private const val TAB_SERVICES = 2
+        private const val TAB_SETTINGS = 3
+
+        private const val COLOR_ACTIVE = "#1565C0"
+        private const val COLOR_INACTIVE = "#9E9E9E"
+        private const val COLOR_BAR = "#FFFFFF"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val pad = (resources.displayMetrics.density * 20).toInt()
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
+            setBackgroundColor(Color.parseColor("#F5F5F5"))
         }
 
-        // ---- title + version ----
-        root.addView(TextView(this).apply {
-            text = getString(R.string.app_name)
-            textSize = 24f
+        // ---- content area ----
+        content = FrameLayout(this)
+        root.addView(content, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+        ))
+
+        // ---- screens ----
+        val home = HomeScreen(this)
+        val logs = LogsScreen(this)
+        val services = ServicesScreen(this)
+        val settings = SettingsScreen(this, onSettingsChanged = {
+            // addresses or key changed: refresh everything that talks to EQR6
+            (home as? Refreshable)?.refresh()
+            (services as? Refreshable)?.refresh()
         })
 
-        root.addView(TextView(this).apply {
-            text = getString(R.string.version_label, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE)
-            textSize = 15f
-            setPadding(0, pad / 2, 0, pad)
-        })
-
-        // ---- version markers ----
-        // Present so an over-the-air update is visually verifiable, not just a
-        // changed number in a text field.
-        root.addView(TextView(this).apply {
-            text = getString(R.string.ota_test_marker)
-            textSize = 15f
-            setTextColor(Color.parseColor("#1565C0"))
-            setPadding(0, pad / 2, 0, 0)
-        })
-        root.addView(TextView(this).apply {
-            text = getString(R.string.ota_marker_github)
-            textSize = 15f
-            setTextColor(Color.parseColor("#2E7D32"))
-            setPadding(0, 0, 0, pad / 2)
-        })
-
-        // ---- check button ----
-        val checkButton = Button(this).apply { text = getString(R.string.check_now) }
-        root.addView(checkButton)
-
-        // ---- status ----
-        statusView = TextView(this).apply {
-            text = getString(R.string.status_idle)
-            textSize = 15f
-            setPadding(0, pad, 0, pad)
-        }
-        root.addView(statusView)
-
-        // ---- separator ----
-        root.addView(TextView(this).apply {
-            text = "\u2500".repeat(30)
-            textSize = 12f
-            setTextColor(Color.LTGRAY)
-            setPadding(0, pad / 2, 0, pad / 2)
-        })
-
-        // ---- update server override ----
-        root.addView(TextView(this).apply {
-            text = getString(R.string.server_label)
-            textSize = 13f
-            setTextColor(Color.DKGRAY)
-        })
-
-        serverEdit = EditText(this).apply {
-            hint = getString(R.string.server_hint)
-            textSize = 14f
-            inputType = InputType.TYPE_TEXT_VARIATION_URI
-            setSingleLine(true)
-            setText(UpdateChecker.candidateUrls(this@MainActivity).firstOrNull() ?: "")
-        }
-        // show the saved override if there is one, otherwise the first default
-        val saved = android.preference.PreferenceManager
-            .getDefaultSharedPreferences(this)
-            .getString(UpdateChecker.PREF_MANIFEST_URL, null)
-        serverEdit.setText(saved ?: "")
-        root.addView(serverEdit)
-
-        val saveButton = Button(this).apply { text = getString(R.string.server_save) }
-        root.addView(saveButton)
-
-        // ---- hint ----
-        root.addView(TextView(this).apply {
-            text = getString(R.string.probe_hint)
-            textSize = 12f
-            setTextColor(Color.GRAY)
-            setPadding(0, pad, 0, 0)
-        })
-
-        setContentView(ScrollView(this).apply {
-            addView(root, ViewGroup.LayoutParams(
+        screens = listOf(home, logs, services, settings)
+        for (s in screens) {
+            content.addView(s, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                ViewGroup.LayoutParams.MATCH_PARENT
             ))
-        })
-
-        checkButton.setOnClickListener { checkForUpdates(manual = true) }
-
-        saveButton.setOnClickListener {
-            val typed = serverEdit.text.toString().trim()
-            UpdateChecker.saveManifestUrl(this, if (typed.isEmpty()) null else typed)
-            Toast.makeText(
-                this,
-                if (typed.isEmpty()) getString(R.string.server_reset) else getString(R.string.server_saved),
-                Toast.LENGTH_SHORT
-            ).show()
+            s.visibility = View.GONE
         }
 
-        // silent automatic check on launch
-        checkForUpdates(manual = false)
-    }
-
-    private fun checkForUpdates(manual: Boolean) {
-        statusView.setTextColor(Color.DKGRAY)
-        statusView.text = getString(R.string.status_checking)
-
-        UpdateChecker.check(this) { result ->
-            runOnUiThread {
-                when (result) {
-                    is UpdateChecker.Result.UpToDate -> {
-                        statusView.setTextColor(Color.parseColor("#2E7D32"))
-                        statusView.text = getString(
-                            R.string.status_uptodate, result.version, result.source
-                        )
-                    }
-                    is UpdateChecker.Result.Available -> {
-                        statusView.setTextColor(Color.parseColor("#1565C0"))
-                        statusView.text = getString(
-                            R.string.status_available, result.version, result.versionCode
-                        )
-                        promptInstall(result)
-                    }
-                    is UpdateChecker.Result.Failed -> {
-                        statusView.setTextColor(Color.parseColor("#C62828"))
-                        statusView.text = getString(R.string.status_failed, result.reason)
-                        if (manual) {
-                            Toast.makeText(this, result.reason, Toast.LENGTH_LONG).show()
-                        }
-                    }
-                }
+        // ---- tab bar ----
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.parseColor(COLOR_BAR))
+            elevation = 8f
+        }
+        val tabs = listOf("首页" to "\uD83C\uDFE0", "日志" to "\uD83D\uDCC4",
+                          "服务" to "\u2699", "设置" to "\uD83D\uDD27")
+        val views = mutableListOf<TextView>()
+        for ((i, t) in tabs.withIndex()) {
+            val tv = TextView(this).apply {
+                text = "${t.second}\n${t.first}"
+                gravity = Gravity.CENTER
+                textSize = 11f
+                setPadding(0, 14, 0, 14)
+                setOnClickListener { select(i) }
             }
+            bar.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            views.add(tv)
+        }
+        tabViews = views
+        root.addView(bar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        setContentView(root)
+
+        select(TAB_HOME)
+
+        // If the app is opened without a key yet, point the user at Settings.
+        if (Prefs.apiKey(this).isBlank()) {
+            select(TAB_SETTINGS)
         }
     }
 
-    /**
-     * Android refuses silent APK installs unless the app holds special
-     * privileges. The normal non-root flow:
-     *   1. user grants "install unknown apps" for this app once
-     *   2. then we launch the system package installer
-     */
-    private fun promptInstall(update: UpdateChecker.Result.Available) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            if (!packageManager.canRequestPackageInstalls()) {
-                Toast.makeText(this, getString(R.string.need_install_permission), Toast.LENGTH_LONG).show()
-                try {
-                    startActivity(
-                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
-                            .setData(Uri.parse("package:$packageName"))
-                    )
-                } catch (e: Exception) {
-                    // the user can enable it manually
-                }
-                return
-            }
+    private fun select(index: Int) {
+        current = index
+        for ((i, s) in screens.withIndex()) {
+            s.visibility = if (i == index) View.VISIBLE else View.GONE
         }
-        UpdateChecker.download(this, update) { file ->
-            runOnUiThread {
-                if (file == null) {
-                    statusView.setTextColor(Color.parseColor("#C62828"))
-                    statusView.text = getString(R.string.status_download_failed)
-                    return@runOnUiThread
-                }
-                statusView.setTextColor(Color.parseColor("#2E7D32"))
-                statusView.text = getString(R.string.status_downloaded, file.name)
-                launchInstaller(file)
-            }
+        for ((i, t) in tabViews.withIndex()) {
+            val active = i == index
+            t.setTextColor(Color.parseColor(if (active) COLOR_ACTIVE else COLOR_INACTIVE))
+            t.alpha = if (active) 1.0f else 0.7f
         }
+        (screens[index] as? Refreshable)?.refresh()
     }
 
-    private fun launchInstaller(apk: File) {
-        try {
-            // Android 7.0+ forbids handing a file:// URI to another app:
-            // that threw FileUriExposedException on the first OTA attempt.
-            // ApkProvider serves it as content:// instead.
-            val uri: Uri = ApkProvider.uriFor(this, apk)
+    /** Lets a screen jump to another tab (e.g. a Home card opening the log list). */
+    fun selectTab(index: Int) {
+        if (index in screens.indices) select(index)
+    }
 
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(intent)
-        } catch (e: Exception) {
-            statusView.setTextColor(Color.parseColor("#C62828"))
-            statusView.text = getString(R.string.status_install_failed, e.message ?: "unknown")
-        }
+    override fun onResume() {
+        super.onResume()
+        // Tailscale may have been toggled while the app was in the background
+        (screens.getOrNull(current) as? Refreshable)?.refresh()
+    }
+
+    /** Implemented by screens that need to re-read state when shown. */
+    interface Refreshable {
+        fun refresh()
     }
 }
