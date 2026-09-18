@@ -29,8 +29,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Set up Android SDK components
+        # GitHub's ubuntu-latest runner already ships an Android SDK, so we do
+        # not use a third-party setup action. The first attempt failed inside
+        # android-actions/setup-android@v3; using the preinstalled SDK instead.
+        run: |
+          if [ -z "$ANDROID_HOME" ]; then
+            echo "ANDROID_HOME not set; falling back to /usr/local/lib/android/sdk"
+            echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+            echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          fi
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "using SDK: $SDK"
+          ls "$SDK" || true
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
 
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew || true
