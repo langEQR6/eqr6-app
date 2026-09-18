@@ -37,6 +37,12 @@ class HomeScreen(context: Context) : LinearLayout(context), MainActivity.Refresh
     private val diskBox = LinearLayout(context)
     private val uptimeText = TextView(context)
 
+    // status is fetched only on request, never when the tab is shown
+    private val loadButton = TextView(context)
+    private val progressBar = ProgressBar(context, null, android.R.attr.progressBarStyleSmall)
+    private var statusLoaded = false
+    private var loading = false
+
     init {
         orientation = VERTICAL
         setBackgroundColor(Color.parseColor("#F5F5F5"))
@@ -57,14 +63,28 @@ class HomeScreen(context: Context) : LinearLayout(context), MainActivity.Refresh
             setTextColor(Color.parseColor("#212121"))
         }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         val refreshBtn = TextView(context).apply {
-            text = "\u21BB 刷新"
+            text = "\u21BB \u5237\u65B0"
             textSize = 14f
             setTextColor(Color.parseColor("#1565C0"))
             setPadding(dp(10), dp(6), dp(10), dp(6))
-            setOnClickListener { refresh() }
+            setOnClickListener { loadStatus() }
         }
         header.addView(refreshBtn)
         inner.addView(header)
+
+        // ---------- status load button (the card is not auto-fetched) ----------
+        loadButton.apply {
+            text = "\u67E5\u770B\u670D\u52A1\u5668\u72B6\u6001"
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(Color.parseColor("#FFFFFF"))
+            setBackgroundColor(Color.parseColor("#1565C0"))
+            setPadding(dp(14), dp(13), dp(14), dp(13))
+            setOnClickListener { loadStatus() }
+        }
+        inner.addView(loadButton, marginParams(top = 12))
+        progressBar.visibility = GONE
+        inner.addView(progressBar, marginParams(top = 8))
 
         // ---------- tailscale banner ----------
         tsBanner.apply {
@@ -199,21 +219,85 @@ class HomeScreen(context: Context) : LinearLayout(context), MainActivity.Refresh
 
     override fun refresh() {
         updateTailscaleBanner()
+        // The status card is NOT fetched here on purpose: visiting this tab
+        // should be instant. Fetching waits for the user to tap the button.
+        if (!statusLoaded) {
+            showStatusPlaceholder()
+        }
+    }
 
-        headline.text = "\u2026"
+    private fun showStatusPlaceholder() {
+        headline.text = ""
         headline.setTextColor(Color.parseColor("#9E9E9E"))
-        memText.text = "\u6B63\u5728\u8BFB\u53D6\u2026"
+        memText.text = "\u70B9\u51FB\u4E0B\u9762\u7684\u6309\u94AE\u67E5\u770B\u670D\u52A1\u5668\u72B6\u6001"
+        memBar.progress = 0
+        diskBox.removeAllViews()
+        uptimeText.text = ""
+        footer.text = ""
+        serviceBox.removeAllViews()
+        serviceBox.addView(TextView(context).apply {
+            text = "\u5C1A\u672A\u8BFB\u53D6"
+            textSize = 13f
+            setTextColor(Color.parseColor("#9E9E9E"))
+            setPadding(0, dp(10), 0, dp(10))
+        })
+        loadButton.visibility = VISIBLE
+        loadButton.text = "\u67E5\u770B\u670D\u52A1\u5668\u72B6\u6001"
+        progressBar.visibility = GONE
+    }
+
+    /** User asked for the status: fetch it once and render. */
+    private fun loadStatus() {
+        if (loading) return
+        loading = true
+        loadButton.visibility = GONE
+        progressBar.visibility = VISIBLE
+        memText.text = "\u6B63\u5728\u8BFB\u53D6\u670D\u52A1\u5668\u72B6\u6001\u2026"
         diskBox.removeAllViews()
         serviceBox.removeAllViews()
         uptimeText.text = ""
         footer.text = ""
 
         ApiClient.get(context, "/api/status") { result ->
+            loading = false
+            progressBar.visibility = GONE
             when (result) {
-                is ApiClient.Result.Ok -> renderStatus(result.json, result.base)
-                is ApiClient.Result.Err -> renderError(result.message)
+                is ApiClient.Result.Ok -> {
+                    statusLoaded = true
+                    loadButton.text = "\u5237\u65B0\u670D\u52A1\u5668\u72B6\u6001"
+                    loadButton.visibility = VISIBLE
+                    renderStatus(result.json, result.base)
+                }
+                is ApiClient.Result.Err -> {
+                    statusLoaded = false
+                    showStatusPlaceholder()
+                    showConnectionProblem(result.message)
+                }
             }
         }
+    }
+
+    /** A failure dialog that names the likely cause and what to do about it. */
+    private fun showConnectionProblem(detail: String) {
+        val env = NetEnv.probe(context)
+        val msg = buildString {
+            append("\u5F53\u524D\u73AF\u5883\uff1a").append(NetEnv.transportLabel(env.transport)).append('\n')
+            append("Tailscale\uff1a").append(if (env.tailscaleUp) "\u5DF2\u8FDE\u63A5" else "\u672A\u8FDE\u63A5").append('\n')
+            append("EQR6 \u5C40\u57DF\u7F51\uff1a").append(if (env.eqr6LanReachable) "\u53EF\u8FBE" else "\u4E0D\u53EF\u8FBE").append('\n')
+            append("EQR6 Tailscale\uff1a").append(if (env.eqr6TailscaleReachable) "\u53EF\u8FBE" else "\u4E0D\u53EF\u8FBE")
+            append("\n\n")
+            append(NetEnv.advice(env))
+            append("\n\n\u8BE6\u60C5\uff1a\n").append(detail)
+        }
+        AlertDialog.Builder(context)
+            .setTitle("\u8FDE\u4E0D\u4E0A EQR6")
+            .setMessage(msg)
+            .setPositiveButton("\u91CD\u8BD5") { _, _ -> loadStatus() }
+            .setNeutralButton("\u8BBE\u7F6E") { _, _ ->
+                (context as? MainActivity)?.selectTab(3)
+            }
+            .setNegativeButton("\u5173\u95ED", null)
+            .show()
     }
 
     private fun updateTailscaleBanner() {

@@ -1,72 +1,56 @@
 package com.eqr6.app
 
 import android.content.Context
-import android.preference.PreferenceManager
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.net.URL
 import java.util.concurrent.Executors
 
 /**
- * Over-the-air update checker.
+ * Over-the-air update logic, split into three deliberate steps:
  *
- * The manifest is a small JSON document:
+ *   check()     - read the manifest and report what is available
+ *   download()  - fetch the APK (only when the user asks)
+ *   (install)   - hand the file to the system installer
  *
- *   {
- *     "versionCode": 2,
- *     "versionName": "1.1",
- *     "apkUrl": "eqr6-app-release.apk",
- *     "sha256": "...",
- *     "notes": "what changed"
- *   }
- *
- * `apkUrl` may be absolute (https://...) or relative to the manifest URL.
+ * The split exists because the original version started downloading the moment
+ * it saw a new version, which left no room for the user to decide and gave no
+ * visible progress.
  *
  * MULTIPLE CANDIDATE ADDRESSES
  * ----------------------------
- * The server is reachable two different ways depending on where the phone is:
+ *   1. LAN       192.168.3.11:8080     fastest, at home
+ *   2. Tailscale 100.77.117.76:8080    works anywhere, if Tailscale is on
+ *   3. GitHub    releases/latest       any network, github.com permitting
  *
- *   at home            -> http://192.168.3.11:8080     (LAN, fast)
- *   anywhere else      -> http://100.77.117.76:8080    (Tailscale)
+ * A user override in Settings replaces all three.
  *
- * We cannot know which one applies, and a wrong guess used to hang for the
- * full timeout. So each candidate is first probed with a short TCP connect
- * (2.5 s) and only the reachable ones are used. A user override can be saved
- * from the UI, which also covers a future GitHub-hosted manifest.
+ * Each candidate is probed with a short TCP connect first, and every failure is
+ * recorded so the UI can explain which addresses were tried and why they
+ * failed rather than showing a single opaque error.
  */
 object UpdateChecker {
 
-    private val io = Executors.newSingleThreadExecutor()
+    private val io = Executors.newCachedThreadPool()
 
-    const val PREF_MANIFEST_URL = "manifest_url"
+    private const val PROBE_TIMEOUT_MS = 4000
+    private const val CONNECT_TIMEOUT_MS = 12000
+    private const val READ_TIMEOUT_MS = 20000
 
-    /**
-     * Ordered candidates.
-     *
-     *  1. LAN      - fastest when the phone is at home
-     *  2. Tailscale- works anywhere, but only if the phone has Tailscale on
-     *  3. GitHub   - works on ANY network with no VPN and no home server
-     *
-     * Each is probed with a short TCP connect first, so an unreachable entry
-     * costs ~4 s rather than a full HTTP timeout.
-     */
     private val DEFAULT_CANDIDATES = listOf(
         "http://192.168.3.11:8080/version.json",
         "http://100.77.117.76:8080/version.json",
         "https://github.com/langEQR6/eqr6-app/releases/latest/download/version.json"
     )
 
-    private const val PROBE_TIMEOUT_MS = 4000
-    private const val CONNECT_TIMEOUT_MS = 12000
-    private const val READ_TIMEOUT_MS = 20000
-
     sealed class Result {
+        /** Already on the newest build. */
         data class UpToDate(val version: String, val source: String) : Result()
+
+        /** A newer build exists. Nothing is downloaded yet. */
         data class Available(
             val versionCode: Int,
             val version: String,
@@ -74,39 +58,61 @@ object UpdateChecker {
             val notes: String,
             val source: String
         ) : Result()
-        data class Failed(val reason: String) : Result()
+
+        /**
+         * Nothing could be read.
+         * `detail` lists every address tried, and `hint` is the environment
+         * based advice the UI should show.
+         */
+        data class Failed(val detail: String, val hint: String) : Result()
     }
 
-    /** The list the app should try, honouring a saved override. */
+    data class DownloadProgress(
+        val downloaded: Long,
+        val total: Long,
+        val percent: Int
+    )
+
+    private fun onUi(action: () -> Unit) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post(action)
+    }
+
+    // ------------------------------------------------------------------
+    // candidate selection
+    // ------------------------------------------------------------------
+
     fun candidateUrls(context: Context): List<String> {
-        val saved = PreferenceManager.getDefaultSharedPreferences(context)
-            .getString(PREF_MANIFEST_URL, null)
-        return if (!saved.isNullOrBlank()) listOf(saved) else DEFAULT_CANDIDATES
+        val saved = Prefs.manifestUrl(context)
+        return if (saved.isNullOrBlank()) DEFAULT_CANDIDATES else listOf(saved)
     }
 
-    fun saveManifestUrl(context: Context, url: String?) {
-        PreferenceManager.getDefaultSharedPreferences(context)
-            .edit()
-            .apply {
-                if (url.isNullOrBlank()) remove(PREF_MANIFEST_URL) else putString(PREF_MANIFEST_URL, url.trim())
-            }
-            .apply()
+    /** Which channel a URL belongs to, for display. */
+    fun channelOf(url: String): String = when {
+        url.contains("github.com") -> "GitHub"
+        url.contains("192.168.") -> "局域网"
+        url.contains("100.") -> "Tailscale"
+        else -> "自定义"
     }
+
+    // ------------------------------------------------------------------
+    // step 1: check
+    // ------------------------------------------------------------------
 
     fun check(context: Context, callback: (Result) -> Unit) {
         io.execute {
             val candidates = candidateUrls(context)
             val notes = StringBuilder()
+            var reachableCount = 0
 
             for (url in candidates) {
-                // fast reachability probe first: avoids waiting a full HTTP
-                // timeout on an address that is simply not on this network
+                val channel = channelOf(url)
                 if (!isReachable(url)) {
-                    notes.append(hostOf(url)).append(": unreachable\n")
+                    notes.append("• ").append(channel).append("：无法连接（")
+                        .append(hostOf(url)).append("）\n")
                     continue
                 }
+                reachableCount++
                 try {
-                    val source = hostOf(url)
                     val manifest = fetchManifest(url, null)
                     val json = JSONObject(manifest)
                     val code = json.optInt("versionCode", 0)
@@ -114,77 +120,59 @@ object UpdateChecker {
                     val changeNotes = json.optString("notes", "")
 
                     if (code <= BuildConfig.VERSION_CODE) {
-                        callback(Result.UpToDate(BuildConfig.VERSION_NAME, source))
+                        onUi { callback(Result.UpToDate(BuildConfig.VERSION_NAME, channel)) }
                         return@execute
                     }
 
                     var raw = json.optString("apkUrl", "")
                     if (raw.isBlank()) {
-                        notes.append(source).append(": manifest has no apkUrl\n")
+                        notes.append("• ").append(channel).append("：清单缺少 apkUrl\n")
                         continue
                     }
-                    // A relative apkUrl normally sits beside the manifest. For
-                    // GitHub we resolve it through the API instead, because the
-                    // github.com redirect is blocked here.
                     if (url.contains("/releases/") && url.contains("github.com")) {
                         try {
                             val base = url.substringBeforeLast('/')
                             raw = resolveGithubRelease("$base/$raw", null)
                         } catch (e: Exception) {
-                            // fall back to the literal relative resolution
+                            // keep the literal relative path as a fallback
                         }
                     }
                     val apkUrl = if (raw.startsWith("http")) raw else resolveRelative(url, raw)
-                    callback(Result.Available(code, name, apkUrl, changeNotes, source))
+                    onUi { callback(Result.Available(code, name, apkUrl, changeNotes, channel)) }
                     return@execute
                 } catch (e: Exception) {
-                    notes.append(hostOf(url)).append(": ").append(e.message ?: "error").append('\n')
+                    notes.append("• ").append(channel).append("：")
+                        .append(e.message ?: "读取失败").append('\n')
                 }
             }
 
-            callback(Result.Failed(notes.toString().trim().ifBlank { "no update server reachable" }))
-        }
-    }
-
-    /**
-     * Fetch the manifest, with a China-friendly fallback for GitHub.
-     *
-     * A `github.com/.../releases/latest/download/...` URL is tried first
-     * (works wherever github.com is reachable, e.g. with a VPN). If that
-     * fails, we fall back to `api.github.com`, which is reachable from
-     * mainland China and redirects asset downloads straight to the CDN.
-     */
-    private fun fetchManifest(url: String, apiToken: String?): String {
-        val isGithubRelease = url.contains("github.com") && url.contains("/releases/latest/download/")
-        if (!isGithubRelease) return httpGet(url)
-
-        return try {
-            httpGet(url)
-        } catch (directError: Exception) {
-            // rebuild the same request against api.github.com
-            val apiUrl = url
-                .replace("https://github.com/", "https://api.github.com/repos/")
-                .replace("/releases/latest/download/", "/releases/latest/download/")
-            try {
-                httpGet(apiUrl)
-            } catch (apiError: Exception) {
-                // last resort: resolve the asset id via the releases endpoint
-                val assetApi = resolveGithubRelease(apiUrl, apiToken)
-                httpGet(assetApi)
+            val env = NetEnv.probe(context)
+            val detail = if (notes.isBlank()) {
+                "没有配置任何更新地址。"
+            } else {
+                "已尝试 ${candidates.size} 个通道，其中 $reachableCount 个可连接：\n$notes"
             }
+            val hint = NetEnv.updateAdvice(env)
+            onUi { callback(Result.Failed(detail.trim(), hint)) }
         }
     }
 
-    fun download(context: Context, update: Result.Available, callback: (File?) -> Unit) {
-        io.execute {
-            try {
-                val dir = File(context.cacheDir, "updates").apply { mkdirs() }
-                val target = File(dir, "app-${update.versionCode}.apk")
-                if (target.exists()) target.delete()
+    // ------------------------------------------------------------------
+    // step 2: download (explicit user action)
+    // ------------------------------------------------------------------
 
-                // The Accept header matters: a GitHub API asset URL returns
-                // JSON metadata instead of the file unless it is set to
-                // application/octet-stream. Hence the shared helper.
+    fun download(
+        context: Context,
+        update: Result.Available,
+        onProgress: (DownloadProgress) -> Unit,
+        callback: (File?, String?) -> Unit
+    ) {
+        io.execute {
+            val dir = File(context.cacheDir, "updates").apply { mkdirs() }
+            val target = File(dir, "app-${update.versionCode}.apk")
+            if (target.exists()) target.delete()
+
+            try {
                 val isGithubApi = update.apkUrl.contains("api.github.com/repos/") &&
                         update.apkUrl.contains("/releases/assets/")
                 val conn = (URL(update.apkUrl).openConnection() as HttpURLConnection).apply {
@@ -197,11 +185,18 @@ object UpdateChecker {
                     }
                     connect()
                 }
-                if (conn.responseCode !in 200..299) {
+
+                val code = conn.responseCode
+                if (code !in 200..299) {
                     conn.disconnect()
-                    callback(null)
+                    onUi { callback(null, "服务器返回 HTTP $code\n通道：${update.source}") }
                     return@execute
                 }
+
+                val total = conn.contentLengthLong
+                var done = 0L
+                var lastPct = -1
+
                 BufferedInputStream(conn.inputStream).use { input ->
                     FileOutputStream(target).use { output ->
                         val buf = ByteArray(64 * 1024)
@@ -209,86 +204,62 @@ object UpdateChecker {
                             val n = input.read(buf)
                             if (n <= 0) break
                             output.write(buf, 0, n)
+                            done += n
+                            val pct = if (total > 0) ((done * 100) / total).toInt() else -1
+                            if (pct != lastPct) {
+                                lastPct = pct
+                                onUi { onProgress(DownloadProgress(done, total, pct)) }
+                            }
                         }
                     }
                 }
                 conn.disconnect()
-                callback(if (target.length() > 0) target else null)
+
+                if (target.length() <= 0) {
+                    onUi { callback(null, "下载完成但文件为空（可能被拦截）") }
+                    return@execute
+                }
+                onUi { callback(target, null) }
             } catch (e: Exception) {
-                callback(null)
+                val msg = when {
+                    e.message?.contains("timeout", true) == true ->
+                        "下载超时。移动网络较慢时容易发生，建议连 WiFi 后重试。\n通道：${update.source}"
+                    e.message?.contains("Unable to resolve host", true) == true ->
+                        "无法解析下载地址的主机名。GitHub 通道可能需要科学上网。"
+                    else -> "下载失败：${e.message ?: e.javaClass.simpleName}"
+                }
+                onUi { callback(null, msg) }
             }
         }
     }
 
     // ------------------------------------------------------------------
-    // helpers
+    // manifest fetching
     // ------------------------------------------------------------------
 
-    /** Quick TCP connect test so an offline address fails fast, not after a full HTTP timeout. */
-    private fun isReachable(url: String): Boolean {
+    private fun fetchManifest(url: String, apiToken: String?): String {
+        val isGithubRelease =
+            url.contains("github.com") && url.contains("/releases/latest/download/")
+        if (!isGithubRelease) return httpGet(url)
+
         return try {
-            val u = URL(url)
-            // https defaults to 443, not 80 - getting this wrong made every
-            // https candidate look unreachable.
-            val port = if (u.port > 0) u.port else if (u.protocol == "https") 443 else 80
-            Socket().use { s ->
-                s.connect(InetSocketAddress(u.host, port), PROBE_TIMEOUT_MS)
-                true
+            httpGet(url)
+        } catch (directError: Exception) {
+            val apiUrl = url
+                .replace("https://github.com/", "https://api.github.com/repos/")
+            try {
+                httpGet(apiUrl)
+            } catch (apiError: Exception) {
+                httpGet(resolveGithubRelease(apiUrl, apiToken))
             }
-        } catch (e: Exception) {
-            false
         }
     }
 
-    private fun httpGet(url: String): String {
-        // GitHub API asset downloads need the octet-stream Accept header to
-        // return the file. They are followed automatically to the asset CDN.
-        val isGithubApi = url.contains("api.github.com/repos/") && url.contains("/releases/assets/")
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = READ_TIMEOUT_MS
-            instanceFollowRedirects = true
-            if (isGithubApi) {
-                setRequestProperty("Accept", "application/octet-stream")
-                setRequestProperty("User-Agent", "EQR6-App")
-            } else {
-                setRequestProperty("Cache-Control", "no-cache")
-            }
-            connect()
-        }
-        return try {
-            if (conn.responseCode !in 200..299) {
-                throw IllegalStateException("HTTP ${conn.responseCode}")
-            }
-            conn.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            conn.disconnect()
-        }
-    }
-
-    /**
-     * Resolve a version manifest from a GitHub release.
-     *
-     * WHY THIS IS NEEDED IN MAINLAND CHINA
-     * ------------------------------------
-     * `https://github.com/<o>/<r>/releases/latest/download/version.json`
-     * is the obvious URL, but it redirects through github.com, which is
-     * frequently blocked, so the redirect dies even though the file itself
-     * lives on a reachable CDN (objects.githubusercontent.com).
-     *
-     * api.github.com, by contrast, is reachable. Asking the API for the
-     * release's assets returns metadata directly, and fetching
-     * `.../releases/assets/<id>` with Accept: application/octet-stream
-     * redirects straight to the CDN.
-     *
-     * `apiToken` is optional: unauthenticated calls work for public repos.
-     */
     private fun resolveGithubRelease(manifestUrl: String, apiToken: String?): String {
         val cut = manifestUrl.indexOf("/releases/")
         if (cut < 0) throw IllegalStateException("not a release URL")
-
-        val apiRepoBase = manifestUrl.substring(0, cut)          // https://api.github.com/repos/O/R
-        val wantName = manifestUrl.substringAfterLast('/')       // version.json
+        val apiRepoBase = manifestUrl.substring(0, cut)
+        val wantName = manifestUrl.substringAfterLast('/')
 
         val releaseJson = JSONObject(apiGet(apiRepoBase + "/releases/latest", apiToken))
         val assets = releaseJson.optJSONArray("assets")
@@ -324,6 +295,41 @@ object UpdateChecker {
             conn.inputStream.bufferedReader().use { it.readText() }
         } finally {
             conn.disconnect()
+        }
+    }
+
+    private fun httpGet(url: String): String {
+        val isGithubApi = url.contains("api.github.com/repos/") &&
+                url.contains("/releases/assets/")
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = READ_TIMEOUT_MS
+            instanceFollowRedirects = true
+            if (isGithubApi) {
+                setRequestProperty("Accept", "application/octet-stream")
+                setRequestProperty("User-Agent", "EQR6-App")
+            } else {
+                setRequestProperty("Cache-Control", "no-cache")
+            }
+            connect()
+        }
+        return try {
+            if (conn.responseCode !in 200..299) {
+                throw IllegalStateException("HTTP ${conn.responseCode}")
+            }
+            conn.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun isReachable(url: String): Boolean {
+        return try {
+            val u = URL(url)
+            val port = if (u.port > 0) u.port else if (u.protocol == "https") 443 else 80
+            NetEnv.tcpReachable(u.host, port)
+        } catch (e: Exception) {
+            false
         }
     }
 

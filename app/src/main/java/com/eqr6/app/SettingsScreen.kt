@@ -30,6 +30,16 @@ class SettingsScreen(
     private val sshBox = LinearLayout(context)
     private val versionText = TextView(context)
     private val updateStatus = TextView(context)
+    // OTA controls
+    private val upProgress = android.widget.ProgressBar(
+        context, null, android.R.attr.progressBarStyleHorizontal
+    )
+    private val upButtons = LinearLayout(context)
+    private val upEnv = TextView(context)
+
+    // current OTA state
+    private var pendingUpdate: UpdateChecker.Result.Available? = null
+    private var downloadedApk: java.io.File? = null
 
     init {
         orientation = VERTICAL
@@ -140,12 +150,32 @@ class SettingsScreen(
             setTextColor(Color.parseColor("#212121"))
         }
         upCard.addView(versionText)
-        upCard.addView(spacer(12))
-        upCard.addView(actionButton("检查更新", true) { checkUpdate() })
-        updateStatus.apply {
+
+        // progress bar, hidden until a download runs
+        upProgress.apply {
+            max = 100
+            visibility = android.view.View.GONE
+        }
+        upCard.addView(upProgress, topGap(10))
+
+        // the three step buttons; only the relevant one is visible
+        upCard.addView(upButtons, topGap(12))
+
+        // environment snapshot, filled by refreshEnvLine()
+        upEnv.apply {
             textSize = 11f
             setTextColor(Color.parseColor("#757575"))
-            setPadding(0, dp(8), 0, 0)
+            setBackgroundColor(Color.parseColor("#F5F5F5"))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        upCard.addView(upEnv, topGap(12))
+
+        // status / diagnostics text
+        updateStatus.apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#757575"))
+            setPadding(0, dp(10), 0, 0)
+            setTextIsSelectable(true)
         }
         upCard.addView(updateStatus)
         inner.addView(upCard, topGap(8))
@@ -248,20 +278,160 @@ class SettingsScreen(
     }
 
     private fun checkUpdate() {
-        updateStatus.text = "检查中…"
+        pendingUpdate = null
+        downloadedApk = null
+        updateStatus.setTextColor(Color.parseColor("#757575"))
+        updateStatus.text = "正在检查所有通道…"
+        renderUpdateButtons()
+
         UpdateChecker.check(context) { result ->
             post {
                 when (result) {
-                    is UpdateChecker.Result.UpToDate ->
-                        updateStatus.text = "已是最新版本 (${result.version}) · 来源：${result.source}"
-                    is UpdateChecker.Result.Available ->
-                        updateStatus.text =
-                            "发现新版本 ${result.version} (build ${result.versionCode}) · 来源：${result.source}"
-                    is UpdateChecker.Result.Failed ->
-                        updateStatus.text = "检查失败：${result.reason}"
+                    is UpdateChecker.Result.UpToDate -> {
+                        updateStatus.setTextColor(Color.parseColor("#2E7D32"))
+                        updateStatus.text = "✔ 已是最新版本 ${result.version}\n来源：${result.source}"
+                        renderUpdateButtons()
+                    }
+                    is UpdateChecker.Result.Available -> {
+                        pendingUpdate = result
+                        updateStatus.setTextColor(Color.parseColor("#1565C0"))
+                        buildString {
+                            append("发现新版本 ").append(result.version)
+                            append(" (build ").append(result.versionCode).append(")\n")
+                            append("来源：").append(result.source)
+                            if (result.notes.isNotBlank()) {
+                                append("\n说明：").append(result.notes)
+                            }
+                            append("\n\n点下面的按钮开始下载。")
+                        }.let { updateStatus.text = it }
+                        renderUpdateButtons()
+                    }
+                    is UpdateChecker.Result.Failed -> {
+                        updateStatus.setTextColor(Color.parseColor("#C62828"))
+                        updateStatus.text = "✖ 检查失败\n\n${result.hint}\n\n详细：\n${result.detail}"
+                        renderUpdateButtons()
+                    }
                 }
             }
         }
+    }
+
+    /** Start the download only when the user asks for it. */
+    private fun startDownload() {
+        val update = pendingUpdate ?: return
+        updateStatus.setTextColor(Color.parseColor("#1565C0"))
+        updateStatus.text = "正在下载 ${update.version}…"
+        upProgress.visibility = android.view.View.VISIBLE
+        upProgress.progress = 0
+        renderUpdateButtons()
+
+        UpdateChecker.download(
+            context,
+            update,
+            onProgress = { p ->
+                post {
+                    if (p.percent >= 0) {
+                        upProgress.progress = p.percent
+                        updateStatus.text = "正在下载 ${update.version}… ${p.percent}%" +
+                                "  (${fmt(p.downloaded)} / ${fmt(p.total)})"
+                    } else {
+                        updateStatus.text = "正在下载 ${update.version}…  ${fmt(p.downloaded)}"
+                    }
+                }
+            },
+            callback = { file, err ->
+                post {
+                    upProgress.visibility = android.view.View.GONE
+                    if (file != null) {
+                        downloadedApk = file
+                        updateStatus.setTextColor(Color.parseColor("#2E7D32"))
+                        updateStatus.text = "✔ 下载完成（${fmt(file.length())}）\n\n" +
+                                "点下面的按钮安装。安装时系统会询问，确认即可。"
+                    } else {
+                        updateStatus.setTextColor(Color.parseColor("#C62828"))
+                        updateStatus.text = "✖ 下载失败\n\n${err ?: "未知原因"}"
+                    }
+                    renderUpdateButtons()
+                }
+            }
+        )
+    }
+
+    private fun fmt(bytes: Long): String = when {
+        bytes <= 0 -> "?"
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
+        else -> "%.1f MB".format(bytes / 1048576.0)
+    }
+
+    /** Rebuild the button row for the current state. */
+    private fun renderUpdateButtons() {
+        upButtons.removeAllViews()
+
+        when {
+            downloadedApk != null -> {
+                upButtons.addView(actionButton("立即安装", true) {
+                    installApk(downloadedApk!!)
+                })
+                upButtons.addView(actionButton("重新下载", false) { startDownload() })
+            }
+            pendingUpdate != null -> {
+                upButtons.addView(actionButton("下载更新", true) { startDownload() })
+                upButtons.addView(actionButton("重新检查", false) { checkUpdate() })
+            }
+            else -> {
+                upButtons.addView(actionButton("检查更新", true) { checkUpdate() })
+            }
+        }
+    }
+
+    private fun installApk(apk: java.io.File) {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                if (!context.packageManager.canRequestPackageInstalls()) {
+                    updateStatus.setTextColor(Color.parseColor("#EF6C00"))
+                    updateStatus.text = "需要先允许本应用「安装未知应用」。\n" +
+                            "已在设置里打开，回来后再点一次「立即安装」。"
+                    context.startActivity(
+                        android.content.Intent(
+                            android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES
+                        ).setData(android.net.Uri.parse("package:${context.packageName}"))
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                    return
+                }
+            }
+            val uri = ApkProvider.uriFor(context, apk)
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            updateStatus.setTextColor(Color.parseColor("#C62828"))
+            updateStatus.text = "无法启动安装：${e.message}"
+        }
+    }
+
+    /**
+     * Shows what network the phone is on and which channels look usable.
+     * This is the information needed to interpret a failed check.
+     */
+    private fun refreshEnvLine() {
+        upEnv.text = "环境检测中…"
+        Thread {
+            val env = NetEnv.probe(context)
+            post {
+                buildString {
+                    append("当前网络：").append(NetEnv.transportLabel(env.transport)).append('\n')
+                    append("Tailscale：").append(if (env.tailscaleUp) "已连接" else "未连接").append('\n')
+                    append("局域网 EQR6：").append(if (env.eqr6LanReachable) "可达" else "不可达").append('\n')
+                    append("Tailscale EQR6：").append(if (env.eqr6TailscaleReachable) "可达" else "不可达").append('\n')
+                    append("GitHub：").append(if (env.githubReachable) "可达" else "不可达")
+                }.let { upEnv.text = it }
+            }
+        }.start()
     }
 
     override fun refresh() {
@@ -269,6 +439,8 @@ class SettingsScreen(
             "当前版本：${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})"
         updateTsCard()
         refreshSshCard()
+        refreshEnvLine()
+        renderUpdateButtons()
     }
 
     /**
